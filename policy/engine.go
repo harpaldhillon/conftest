@@ -39,6 +39,12 @@ type compilerOptions struct {
 	capabilities *ast.Capabilities
 }
 
+var (
+	ruleDeclRegex = regexp.MustCompile(`((deny|violation|warn).*){\s*`)
+	warningRegex  = regexp.MustCompile("^warn(_[a-zA-Z0-9]+)*$")
+	failureRegex  = regexp.MustCompile("^(deny|violation)(_[a-zA-Z0-9]+)*$")
+)
+
 func newCompilerOptions(strict bool, capabilities string) (compilerOptions, error) {
 	c := ast.CapabilitiesForThisVersion()
 	if capabilities != "" {
@@ -83,6 +89,11 @@ func Load(policyPaths []string, c compilerOptions) (*Engine, error) {
 
 	policyContents := make(map[string]string, len(modules))
 	for path, module := range policies.Modules {
+		match := problematicIf(string(module.Raw))
+		if match != "" {
+			return nil, fmt.Errorf("rule %q in %q contains an invalid use of the if keyword https://github.com/open-policy-agent/opa/issues/6509", match, path)
+		}
+
 		path = filepath.Clean(path)
 		path = filepath.ToSlash(path)
 
@@ -107,7 +118,6 @@ func LoadWithData(policyPaths []string, dataPaths []string, capabilities string,
 
 	engine := &Engine{}
 	if len(policyPaths) > 0 {
-		var err error
 		engine, err = Load(policyPaths, compilerOptions)
 		if err != nil {
 			return nil, fmt.Errorf("loading policies: %w", err)
@@ -519,13 +529,22 @@ func (e *Engine) query(ctx context.Context, input interface{}, query string) (ou
 }
 
 func isWarning(rule string) bool {
-	warningRegex := regexp.MustCompile("^warn(_[a-zA-Z0-9]+)*$")
 	return warningRegex.MatchString(rule)
 }
 
 func isFailure(rule string) bool {
-	failureRegex := regexp.MustCompile("^(deny|violation)(_[a-zA-Z0-9]+)*$")
 	return failureRegex.MatchString(rule)
+}
+
+func problematicIf(moduleBody string) string {
+	ruleDecls := ruleDeclRegex.FindAllStringSubmatch(moduleBody, -1)
+	for _, matches := range ruleDecls {
+		decl := matches[1]
+		if strings.Contains(decl, " if ") && !strings.Contains(decl, " contains ") {
+			return strings.TrimSpace(decl)
+		}
+	}
+	return ""
 }
 
 func contains(collection []string, item string) bool {
